@@ -21,6 +21,19 @@ type AudioPart struct {
 	File string `json:"file"`
 }
 
+// Selection represents a display, window, or cropped screen area to record.
+type Selection struct {
+	Kind      string `json:"kind"`
+	DisplayID int    `json:"displayId,omitempty"`
+	WindowID  int    `json:"windowId,omitempty"`
+	App       string `json:"app,omitempty"`
+	Title     string `json:"title,omitempty"`
+	X         int    `json:"x,omitempty"`
+	Y         int    `json:"y,omitempty"`
+	W         int    `json:"w,omitempty"`
+	H         int    `json:"h,omitempty"`
+}
+
 type RecordingState struct {
 	Pid             int            `json:"pid"`
 	Exe             string         `json:"exe,omitempty"`
@@ -36,6 +49,7 @@ type RecordingState struct {
 	PluginOptions   map[string]any `json:"pluginOptions,omitempty"`
 	Sidecars        []Sidecar      `json:"sidecars,omitempty"`
 	Processes       []int          `json:"processes,omitempty"`
+	Selection       *Selection     `json:"selection,omitempty"`
 }
 
 func exeOrDefault(exe string) string {
