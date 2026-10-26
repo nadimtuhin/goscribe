@@ -7,7 +7,7 @@ build/
 *.dll
 *.so
 *.dylib
-goscribe
+/goscribe
 
 # Test artifacts
 *.test
