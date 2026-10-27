@@ -76,6 +76,9 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	case "devices":
 		return commands.DevicesCommand(args[1:], r, stdout, stderr)
 
+	case "captions":
+		return commands.CaptionsCommand(statePath, r, stdout, stderr)
+
 	case "copy":
 		return commands.CopyCommand(args[1:], stdout, stderr)
 
