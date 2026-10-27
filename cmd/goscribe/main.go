@@ -76,6 +76,18 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	case "devices":
 		return commands.DevicesCommand(args[1:], r, stdout, stderr)
 
+	case "copy":
+		return commands.CopyCommand(args[1:], stdout, stderr)
+
+	case "last":
+		return commands.LastCommand(args[1:], stdout, stderr)
+
+	case "open":
+		return commands.OpenCommand(args[1:], stdout, stderr)
+
+	case "notes":
+		return commands.NotesCommand(args[1:], stdout, stderr)
+
 	default:
 		fmt.Fprintf(stderr, "goscribe %s: not implemented\n", cmd)
 		return 1
