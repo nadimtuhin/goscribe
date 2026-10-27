@@ -88,6 +88,12 @@ func run(args []string, stdout io.Writer, stderr io.Writer) int {
 	case "notes":
 		return commands.NotesCommand(args[1:], stdout, stderr)
 
+	case "queue":
+		return commands.QueueCommand(args[1:], stdout, stderr)
+
+	case "optimize":
+		return commands.OptimizeCommand(args[1:], r, stdout, stderr)
+
 	default:
 		fmt.Fprintf(stderr, "goscribe %s: not implemented\n", cmd)
 		return 1
