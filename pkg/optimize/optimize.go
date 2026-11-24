@@ -127,6 +127,10 @@ type OptimizeQueueData struct {
 func ReadQueue(queuePath string) OptimizeQueueData {
 	queueMu.Lock()
 	defer queueMu.Unlock()
+	return readQueueLocked(queuePath)
+}
+
+func readQueueLocked(queuePath string) OptimizeQueueData {
 	b, err := os.ReadFile(queuePath)
 	if err != nil {
 		return OptimizeQueueData{Jobs: []OptimizeJob{}}
@@ -144,6 +148,10 @@ func ReadQueue(queuePath string) OptimizeQueueData {
 func WriteQueue(queuePath string, data OptimizeQueueData) error {
 	queueMu.Lock()
 	defer queueMu.Unlock()
+	return writeQueueLocked(queuePath, data)
+}
+
+func writeQueueLocked(queuePath string, data OptimizeQueueData) error {
 	if err := os.MkdirAll(filepath.Dir(queuePath), 0755); err != nil {
 		return err
 	}
@@ -158,8 +166,18 @@ func WriteQueue(queuePath string, data OptimizeQueueData) error {
 	return os.Rename(tmp, queuePath)
 }
 
+// modifyQueue holds the lock across read-modify-write so concurrent updates
+// are not lost.
+func modifyQueue(queuePath string, fn func(*OptimizeQueueData) bool) {
+	queueMu.Lock()
+	defer queueMu.Unlock()
+	data := readQueueLocked(queuePath)
+	if fn(&data) {
+		_ = writeQueueLocked(queuePath, data)
+	}
+}
+
 func EnqueueJob(queuePath, input, output, res string, crf int, inBytes int64) OptimizeJob {
-	data := ReadQueue(queuePath)
 	job := OptimizeJob{
 		ID:         fmt.Sprintf("opt_%d_%x", time.Now().UnixMilli(), rand.Int31()&0xffff),
 		Input:      input,
@@ -170,20 +188,23 @@ func EnqueueJob(queuePath, input, output, res string, crf int, inBytes int64) Op
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		InputBytes: inBytes,
 	}
-	data.Jobs = append(data.Jobs, job)
-	_ = WriteQueue(queuePath, data)
+	modifyQueue(queuePath, func(data *OptimizeQueueData) bool {
+		data.Jobs = append(data.Jobs, job)
+		return true
+	})
 	return job
 }
 
 func UpdateJob(queuePath, id string, patch func(*OptimizeJob)) {
-	data := ReadQueue(queuePath)
-	for i := range data.Jobs {
-		if data.Jobs[i].ID == id {
-			patch(&data.Jobs[i])
-			_ = WriteQueue(queuePath, data)
-			return
+	modifyQueue(queuePath, func(data *OptimizeQueueData) bool {
+		for i := range data.Jobs {
+			if data.Jobs[i].ID == id {
+				patch(&data.Jobs[i])
+				return true
+			}
 		}
-	}
+		return false
+	})
 }
 
 func GetNextQueuedJob(queuePath string) *OptimizeJob {
@@ -197,29 +218,29 @@ func GetNextQueuedJob(queuePath string) *OptimizeJob {
 }
 
 func RecoverStaleJobs(queuePath string) {
-	data := ReadQueue(queuePath)
-	changed := false
-	for i := range data.Jobs {
-		if data.Jobs[i].Status == StatusProcessing {
-			data.Jobs[i].Status = StatusQueued
-			changed = true
+	modifyQueue(queuePath, func(data *OptimizeQueueData) bool {
+		changed := false
+		for i := range data.Jobs {
+			if data.Jobs[i].Status == StatusProcessing {
+				data.Jobs[i].Status = StatusQueued
+				changed = true
+			}
 		}
-	}
-	if changed {
-		_ = WriteQueue(queuePath, data)
-	}
+		return changed
+	})
 }
 
 func ClearQueue(queuePath string) {
-	data := ReadQueue(queuePath)
-	var remaining []OptimizeJob
-	for _, j := range data.Jobs {
-		if j.Status == StatusQueued || j.Status == StatusProcessing {
-			remaining = append(remaining, j)
+	modifyQueue(queuePath, func(data *OptimizeQueueData) bool {
+		var remaining []OptimizeJob
+		for _, j := range data.Jobs {
+			if j.Status == StatusQueued || j.Status == StatusProcessing {
+				remaining = append(remaining, j)
+			}
 		}
-	}
-	data.Jobs = remaining
-	_ = WriteQueue(queuePath, data)
+		data.Jobs = remaining
+		return true
+	})
 }
 
 func ProcessQueue(ctx context.Context, queuePath string, r runner.Runner, log func(string)) (int, error) {
@@ -249,7 +270,15 @@ func ProcessQueue(ctx context.Context, queuePath string, r runner.Runner, log fu
 			log(fmt.Sprintf("optimizing %s -> %s", job.Input, job.Output))
 		}
 
-		_, stderr, code, _ := r.Run(ctx, cmd)
+		_, stderr, code, runErr := r.Run(ctx, cmd)
+		if ctx.Err() != nil {
+			// Interrupted, not failed: put the job back for the next worker.
+			UpdateJob(queuePath, job.ID, func(j *OptimizeJob) {
+				j.Status = StatusQueued
+				j.StartedAt = ""
+			})
+			return processed, ctx.Err()
+		}
 		if code == 0 {
 			var outBytes int64
 			if info, err := os.Stat(job.Output); err == nil {
@@ -268,6 +297,9 @@ func ProcessQueue(ctx context.Context, queuePath string, r runner.Runner, log fu
 				j.Status = StatusFailed
 				j.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 				j.Error = strings.TrimSpace(stderr)
+				if j.Error == "" && runErr != nil {
+					j.Error = runErr.Error()
+				}
 			})
 			if log != nil {
 				log(fmt.Sprintf("failed %s: %s", job.ID, stderr))

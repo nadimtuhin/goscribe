@@ -154,6 +154,16 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 		log   string
 	}
 	var procs []procItem
+	// fail kills any process already spawned so a failed start does not
+	// leave detached recorders running in the background.
+	fail := func(err error) (*state.RecordingState, error) {
+		for _, p := range procs {
+			if r.IsAlive(p.pid) {
+				_ = r.Kill(p.pid, syscall.SIGKILL)
+			}
+		}
+		return nil, err
+	}
 
 	if opts.AudioOnly {
 		var micPart *state.AudioPart
@@ -164,7 +174,7 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 			}
 			pid, err := r.SpawnDetached("ffmpeg", ffmpeg.BuildMicArgs(micDev, micFile), ffmpegLog)
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			micPart = &state.AudioPart{Pid: pid, File: micFile}
 			procs = append(procs, procItem{pid: pid, label: "ffmpeg", log: ffmpegLog})
@@ -173,11 +183,11 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 		if recordsSystemAudio {
 			helper, err := EnsureHelper(r, "native/sysaudio.swift", filepath.Join(logDir, "sysaudio"))
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			pid, err := r.SpawnDetached(helper, []string{systemAudioFile}, helperLog)
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			sysPart = &state.AudioPart{Pid: pid, File: systemAudioFile}
 			procs = append(procs, procItem{pid: pid, label: "sysaudio", log: helperLog})
@@ -213,7 +223,7 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 		}
 		pid, err := r.SpawnDetached("ffmpeg", ffmpeg.BuildArgs(screenDev, micDev, fps, videoFile), ffmpegLog)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
 		procs = append(procs, procItem{pid: pid, label: "ffmpeg", log: ffmpegLog})
 		recState.Pid = pid
@@ -223,11 +233,11 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 		if recordsSystemAudio {
 			helper, err := EnsureHelper(r, "native/sysaudio.swift", filepath.Join(logDir, "sysaudio"))
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			spid, err := r.SpawnDetached(helper, []string{systemAudioFile}, helperLog)
 			if err != nil {
-				return nil, err
+				return fail(err)
 			}
 			recState.SystemAudio = &state.AudioPart{Pid: spid, File: systemAudioFile}
 			procs = append(procs, procItem{pid: spid, label: "sysaudio", log: helperLog})
@@ -239,7 +249,7 @@ func Start(opts StartOptions, statePath string, r runner.Runner) (*state.Recordi
 	}
 
 	if err := state.WriteState(statePath, recState); err != nil {
-		return nil, err
+		return fail(err)
 	}
 
 	r.Sleep(DefaultStartupCheckMs)
@@ -265,6 +275,18 @@ type StopResult struct {
 	Forced     bool
 	KeptParts  []string
 	MixError   string
+}
+
+// runFailure describes a failed ffmpeg run, falling back to the exec error or
+// exit code when ffmpeg wrote nothing to stderr.
+func runFailure(stderr string, code int, err error) string {
+	if msg := strings.TrimSpace(stderr); msg != "" {
+		return msg
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("ffmpeg exited with code %d", code)
 }
 
 func hasContent(path string) bool {
@@ -350,14 +372,14 @@ func Stop(statePath string, r runner.Runner) (*StopResult, error) {
 		}
 
 		if len(recorded) == 2 {
-			_, stderr, code, _ := r.Run(context.Background(), append([]string{"ffmpeg"}, ffmpeg.BuildAudioMixArgs(recorded, st.File)...))
+			_, stderr, code, runErr := r.Run(context.Background(), append([]string{"ffmpeg"}, ffmpeg.BuildAudioMixArgs(recorded, st.File)...))
 			if code == 0 {
 				for _, p := range audioParts {
 					_ = os.Remove(p)
 				}
 			} else {
 				res.KeptParts = recorded
-				res.MixError = strings.TrimSpace(stderr)
+				res.MixError = runFailure(stderr, code, runErr)
 			}
 		} else if len(recorded) == 1 {
 			_ = os.Rename(recorded[0], st.File)
@@ -383,13 +405,13 @@ func Stop(statePath string, r runner.Runner) (*StopResult, error) {
 			_ = os.Remove(st.SystemAudio.File)
 		} else {
 			muxArgs := ffmpeg.BuildMuxArgs(st.VideoFile, st.VideoHasMic, st.SystemAudio.File, st.File)
-			_, stderr, code, _ := r.Run(context.Background(), append([]string{"ffmpeg"}, muxArgs...))
+			_, stderr, code, runErr := r.Run(context.Background(), append([]string{"ffmpeg"}, muxArgs...))
 			if code == 0 {
 				_ = os.Remove(st.VideoFile)
 				_ = os.Remove(st.SystemAudio.File)
 			} else {
 				res.KeptParts = []string{st.VideoFile, st.SystemAudio.File}
-				res.MixError = strings.TrimSpace(stderr)
+				res.MixError = runFailure(stderr, code, runErr)
 			}
 		}
 	}
