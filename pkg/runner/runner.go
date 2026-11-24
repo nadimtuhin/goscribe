@@ -82,6 +82,9 @@ func (r *RealRunner) SpawnDetached(bin string, args []string, logFile string) (p
 	if err := cmd.Start(); err != nil {
 		return 0, err
 	}
+	// Reap the child when it exits so it does not linger as a zombie, which
+	// kill(pid, 0) would still report as alive.
+	go func() { _ = cmd.Wait() }()
 	return cmd.Process.Pid, nil
 }
 
